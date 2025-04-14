@@ -78,7 +78,7 @@ def generate_plotly_charts(returns, benchmark_returns=None):
     plotly_charts['drawdown'] = fig_dd
     
     # 3. Monthly Returns Heatmap
-    monthly_returns = returns.resample('M').apply(
+    monthly_returns = returns.resample('ME').apply(
         lambda x: (1 + x).prod() - 1
     ).to_frame()
     
