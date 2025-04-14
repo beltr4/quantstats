@@ -230,9 +230,4 @@ for name, fig in charts.items():
     print(f"Displaying {name} chart...")
     fig.show()
 
-# Optionally, you can also save the charts as HTML files
-for name, fig in charts.items():
-    fig.write_html(f"{name}.html")
-    print(f"Saved {name}.html")
-
 print("All charts have been generated and saved!")
