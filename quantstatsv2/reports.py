@@ -20,6 +20,11 @@
 
 import pandas as _pd
 import numpy as _np
+import plotly.graph_objects as go
+
+from plotly.subplots import make_subplots
+import quantstatsv2 as qs
+
 from math import sqrt as _sqrt, ceil as _ceil
 from datetime import datetime as _dt
 from base64 import b64encode as _b64encode
@@ -1623,3 +1628,250 @@ def _embed_figure(figfiles, figfmt):
         data_uri = _b64encode(figbytes).decode()
         embed_string = '<img src="data:image/{};base64,{}" />'.format(figfmt, data_uri)
     return embed_string
+
+def get_backtest_plotly_charts(self):
+    """
+    Generate interactive Plotly charts for the backtest instead of HTML report.
+    Returns a dictionary of Plotly figure objects that can be used in Python.
+    """
+    try:
+        
+        
+        # Make sure we have returns data
+        if self.data["cum_rets"] is None or len(self.data["cum_rets"]) == 0:
+            print("Error: Strategy returns are empty or None")
+            return None
+        
+        # Convert cumulative returns to simple returns if needed
+        if "rets" in self.data:
+            returns = self.data["rets"]
+        else:
+            # Convert cumulative returns to simple returns
+            returns = self.data["cum_rets"].pct_change().fillna(0)
+        
+        # Get benchmark returns with validation
+        benchmark_returns = None
+        if self.backtest.benchmark:
+            benchmark_returns = self.get_benchmark_returns()
+            if benchmark_returns is not None:
+                # Make sure benchmark is a Series
+                if isinstance(benchmark_returns, _pd.DataFrame):
+                    benchmark_returns = benchmark_returns.iloc[:, 0]
+                # Convert to simple returns if not already
+                if not benchmark_returns.pct_change().equals(benchmark_returns):
+                    benchmark_returns = benchmark_returns.pct_change().fillna(0)
+        
+        # Initialize dictionary to store plotly figures
+        plotly_charts = {}
+        
+        # 1. Cumulative Returns Chart
+        cum_returns = (1 + returns).cumprod()
+        fig_cum = go.Figure()
+        
+        fig_cum.add_trace(go.Scatter(
+            x=cum_returns.index,
+            y=cum_returns.values,
+            mode='lines',
+            name=self.backtest.strategy.title,
+            line=dict(color='#1f77b4', width=2)
+        ))
+        
+        if benchmark_returns is not None:
+            bench_cum_returns = (1 + benchmark_returns).cumprod()
+            fig_cum.add_trace(go.Scatter(
+                x=bench_cum_returns.index,
+                y=bench_cum_returns.values,
+                mode='lines',
+                name=self.backtest.benchmark.name,
+                line=dict(color='#ff7f0e', width=2, dash='dash')
+            ))
+        
+        fig_cum.update_layout(
+            title='Cumulative Returns',
+            xaxis_title='Date',
+            yaxis_title='Cumulative Returns',
+            template='plotly_white',
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hovermode='x unified'
+        )
+        
+        plotly_charts['cumulative_returns'] = fig_cum
+        
+        # 2. Drawdown Chart
+        drawdowns = qs.stats.to_drawdown_series(returns)
+        fig_dd = go.Figure()
+        
+        fig_dd.add_trace(go.Scatter(
+            x=drawdowns.index,
+            y=drawdowns.values * 100,  # Convert to percentage
+            mode='lines',
+            name='Drawdown',
+            fill='tozeroy',
+            line=dict(color='#d62728')
+        ))
+        
+        fig_dd.update_layout(
+            title='Drawdown',
+            xaxis_title='Date',
+            yaxis_title='Drawdown (%)',
+            template='plotly_white',
+            yaxis=dict(tickformat=".2f"),
+            hovermode='x unified'
+        )
+        
+        plotly_charts['drawdown'] = fig_dd
+        
+        # 3. Monthly Returns Heatmap
+        monthly_returns = returns.resample('M').sum().to_frame()
+        monthly_returns.columns = ['returns']
+        monthly_returns['year'] = monthly_returns.index.year
+        monthly_returns['month'] = monthly_returns.index.month
+        
+        # Pivot to get year as rows and month as columns
+        pivot_returns = monthly_returns.pivot(index='year', columns='month', values='returns')
+        
+        # Convert to percentages
+        pivot_returns = pivot_returns * 100
+        
+        # Month names
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        pivot_returns.columns = [month_names[i-1] for i in pivot_returns.columns]
+        
+        # Create the heatmap
+        fig_heatmap = go.Figure(data=go.Heatmap(
+            z=pivot_returns.values,
+            x=pivot_returns.columns,
+            y=pivot_returns.index,
+            colorscale='RdBu',
+            zmid=0,
+            text=[[f"{val:.2f}%" for val in row] for row in pivot_returns.values],
+            hovertemplate="Year: %{y}<br>Month: %{x}<br>Return: %{text}<extra></extra>"
+        ))
+        
+        fig_heatmap.update_layout(
+            title='Monthly Returns (%)',
+            xaxis_title='Month',
+            yaxis_title='Year',
+            template='plotly_white'
+        )
+        
+        plotly_charts['monthly_heatmap'] = fig_heatmap
+        
+        # 4. Rolling Metrics
+        # Create subplot with 2x2 structure
+        fig_rolling = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Rolling Volatility (30D)', 'Rolling Sharpe (30D)', 
+                           'Rolling Max Drawdown (30D)', 'Rolling Beta to Benchmark (30D)')
+        )
+        
+        # Rolling volatility
+        rolling_vol = returns.rolling(window=30).std() * _np.sqrt(252) * 100  # Annualized and as percentage
+        fig_rolling.add_trace(
+            go.Scatter(x=rolling_vol.index, y=rolling_vol.values, 
+                      mode='lines', name='Volatility',
+                      line=dict(color='#1f77b4')),
+            row=1, col=1
+        )
+        
+        # Rolling Sharpe
+        risk_free = 0
+        if self.backtest.risk_free:
+            try:
+                rf = self.backtest.risk_free.get_asset_data("annual_yield")
+                if rf is not None and isinstance(rf, (int, float)):
+                    risk_free = rf
+            except Exception as e:
+                print(f"Error fetching risk-free rate: {e}")
+            
+                
+        daily_rf = ((1 + risk_free) ** (1/252)) - 1
+        excess_returns = returns - daily_rf
+        rolling_sharpe = (excess_returns.rolling(window=30).mean() / 
+                         excess_returns.rolling(window=30).std()) * _np.sqrt(252)
+        
+        fig_rolling.add_trace(
+            go.Scatter(x=rolling_sharpe.index, y=rolling_sharpe.values, 
+                      mode='lines', name='Sharpe',
+                      line=dict(color='#ff7f0e')),
+            row=1, col=2
+        )
+        
+        # Rolling Max Drawdown
+        rolling_dd = returns.rolling(window=30).apply(
+            lambda x: (1 + x).cumprod().div((1 + x).cumprod().cummax()) - 1
+        ).min() * 100
+        
+        fig_rolling.add_trace(
+            go.Scatter(x=rolling_dd.index, y=rolling_dd.values, 
+                      mode='lines', name='Max Drawdown',
+                      line=dict(color='#d62728')),
+            row=2, col=1
+        )
+        
+        # Rolling Beta (if benchmark exists)
+        if benchmark_returns is not None:
+            rolling_cov = returns.rolling(window=30).cov(benchmark_returns)
+            rolling_var = benchmark_returns.rolling(window=30).var()
+            rolling_beta = rolling_cov / rolling_var
+            
+            fig_rolling.add_trace(
+                go.Scatter(x=rolling_beta.index, y=rolling_beta.values, 
+                          mode='lines', name='Beta',
+                          line=dict(color='#2ca02c')),
+                row=2, col=2
+            )
+        
+        fig_rolling.update_layout(
+            template='plotly_white',
+            showlegend=False,
+            height=800,
+            hovermode='x unified'
+        )
+        
+        plotly_charts['rolling_metrics'] = fig_rolling
+        
+        # 5. Return Distribution
+        fig_dist = go.Figure()
+        
+        fig_dist.add_trace(go.Histogram(
+            x=returns.values * 100,
+            nbinsx=50,
+            name='Daily Returns',
+            marker_color='#1f77b4',
+            opacity=0.7
+        ))
+        
+        fig_dist.update_layout(
+            title='Return Distribution',
+            xaxis_title='Daily Return (%)',
+            yaxis_title='Frequency',
+            template='plotly_white',
+            bargap=0.05
+        )
+        
+        # Add a normal distribution curve for comparison
+        mean = returns.mean() * 100
+        std = returns.std() * 100
+        x_range = _np.linspace(mean - 4*std, mean + 4*std, 100)
+        y_vals = qs.stats.norm.pdf(x_range, mean, std) * len(returns) * (8*std/50)
+        
+        fig_dist.add_trace(go.Scatter(
+            x=x_range,
+            y=y_vals,
+            mode='lines',
+            name='Normal Distribution',
+            line=dict(color='red', width=2)
+        ))
+        
+        plotly_charts['return_distribution'] = fig_dist
+        
+        # Return the dictionary of plotly figures
+        return plotly_charts
+        
+    except Exception as e:
+        print(f"Error generating Plotly charts: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    

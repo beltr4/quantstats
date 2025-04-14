@@ -25,4 +25,4 @@ try:
 except ImportError:
     pass
 
-from quantstats._plotting.wrappers import *
+from quantstatsv2._plotting.wrappers import *
